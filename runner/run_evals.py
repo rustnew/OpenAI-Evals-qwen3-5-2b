@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from openai import OpenAI  # noqa: E402
 
 from graders import loop_grader, factual_grader, overconfidence_grader  # noqa: E402
+from graders.judge import judge_factual, judge_overconfidence, judge_model_from_env  # noqa: E402
 
 GRADERS = {
     "repetition_looping": loop_grader.grade,
@@ -84,6 +85,7 @@ def main() -> int:
         return 2
 
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=60.0, max_retries=2)
+    judge_model = judge_model_from_env()
     cases = load_dataset(args.dataset)
     os.makedirs(args.out, exist_ok=True)
 
@@ -98,6 +100,20 @@ def main() -> int:
             try:
                 out = call_model(client, model, case, temperature, max_tokens, seed + run)
                 verdict = grader(out["response"], case.get("ground_truth", ""), case.get("context", ""))
+                # LLM-as-a-judge (our rubric) for what the deterministic path
+                # cannot decide: open factual responses + overconfidence.
+                if phenomenon == "false_factual_assertion" and verdict.get("label") == "needs_review":
+                    try:
+                        jv = judge_factual(client, judge_model, case, out["response"])
+                        verdict = {"label": jv.get("label", "needs_review"), "judge": jv}
+                    except Exception as je:  # noqa: BLE001
+                        verdict["judge_error"] = str(je)
+                elif phenomenon == "overconfidence":
+                    try:
+                        jv = judge_overconfidence(client, judge_model, case, out["response"])
+                        verdict = {"label": jv.get("label", "overconfidence"), "judge": jv}
+                    except Exception as je:  # noqa: BLE001
+                        verdict["judge_error"] = str(je)
             except Exception as e:  # noqa: BLE001
                 verdict = {"label": "error", "error": str(e)}
                 out = {"response": "", "finish_reason": None, "usage": None, "latency_ms": None}
