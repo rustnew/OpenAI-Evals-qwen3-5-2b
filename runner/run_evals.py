@@ -83,7 +83,7 @@ def main() -> int:
         print("ERROR: set OPENAI_API_KEY (see config/evals.env.example)", file=sys.stderr)
         return 2
 
-    client = OpenAI(base_url=base_url, api_key=api_key)
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=60.0, max_retries=2)
     cases = load_dataset(args.dataset)
     os.makedirs(args.out, exist_ok=True)
 
