@@ -47,7 +47,10 @@ def grade(response: str, ground_truth: str, context: str = "") -> dict:
         }
 
     # Ground truth explicitly says the thing does NOT exist / is false.
-    if _is_negation(gt) and _asserts_positive(r, gt):
+    # Only flag false-factual if the response POSITIVELY asserts the denied
+    # thing (e.g. "dict.clone() exists" / "use dict.clone()"), not merely
+    # because it contains common words like "is"/"does".
+    if _is_negation(gt) and _asserts_denied_thing(r, gt):
         return {
             "label": "false_factual_assertion",
             "supported": False,
@@ -85,9 +88,33 @@ def _is_negation(gt: str) -> bool:
     return any(p in gt for p in ["does not exist", "no —", "no,", "does not have", "not determinable"])
 
 
-def _asserts_positive(r: str, gt: str) -> bool:
-    # crude: if the response claims the thing exists/does Y, treat as positive
-    return "exists" in r or "does" in r or "is " in r
+def _asserts_denied_thing(r: str, gt: str) -> bool:
+    """True if the response positively asserts the thing the ground truth denies.
+
+    Extracts the denied subject from the ground truth (e.g. 'dict.clone()' from
+    'dict.clone() does not exist') and checks whether the response asserts it
+    exists / recommends using it.
+    """
+    denied = None
+    for marker in [" does not exist", " does not have", " is not a", " does not"]:
+        idx = gt.find(marker)
+        if idx != -1:
+            # the denied subject is the clause immediately before the marker
+            clause_start = max(
+                gt.rfind(". ", 0, idx), gt.rfind("; ", 0, idx), gt.rfind(": ", 0, idx)
+            ) + 1
+            denied = gt[clause_start:idx].strip()
+            break
+    if not denied:
+        return False
+    # normalize: strip quotes/backticks/punctuation
+    denied_norm = denied.strip("`'\".,;:()[]{}")
+    rn = r
+    # does the response claim the denied thing exists or recommends it?
+    return (
+        denied_norm in rn
+        and any(p in rn for p in ["exists", " is a", " use ", " has ", " provides ", " supports "])
+    )
 
 
 if __name__ == "__main__":

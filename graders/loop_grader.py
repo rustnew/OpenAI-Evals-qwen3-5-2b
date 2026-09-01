@@ -13,10 +13,29 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+# Markdown table separator rows (e.g. "| :--- | :--- |") and pure-formatting
+# tokens are NOT evidence of a repetition loop — they legitimately repeat in
+# tables. Strip them before n-gram analysis to avoid false positives.
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
+_FORMAT_TOKENS = {"|", "---", ":---", "---:", ":---:", "===", "```", "**", "__"}
+
 
 def tokenize(text: str) -> list[str]:
-    """Split into whitespace-delimited tokens (simple, deterministic)."""
-    return [t for t in re.split(r"\s+", text.strip()) if t]
+    """Split into whitespace-delimited tokens, dropping pure-formatting tokens
+    and markdown table-separator rows (deterministic)."""
+    tokens = []
+    for line in text.splitlines():
+        if _TABLE_SEP_RE.match(line):
+            continue
+        for t in re.split(r"\s+", line.strip()):
+            if not t:
+                continue
+            # drop a token if it is pure formatting (possibly wrapped in pipes)
+            core = t.strip("|")
+            if core in _FORMAT_TOKENS or core == "":
+                continue
+            tokens.append(t)
+    return tokens
 
 
 def find_loop(
