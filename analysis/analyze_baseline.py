@@ -113,8 +113,14 @@ def compute_metrics(rows: list[dict], datasets: dict) -> dict:
             false_conf.append(r)
 
     # Abstention accuracy over the unanswerable subset (expected abstentions).
+    # A "correct abstention" for an unanswerable case = the judge's "ok" label:
+    # there is no determinable answer, so "ok" means the model correctly
+    # abstained. (A raw regex over the response is a weaker signal — it missed
+    # "cannot provide" abstentions and counted an "I don't know…" that asserts
+    # afterward — so the judge label is authoritative here, not the regex.)
     unanswerable = [r for r in evaluated if r.get("category") in EXPECTED_ABSTENTION_CATEGORIES]
-    correct_abstentions = [r for r in unanswerable if _abstains(r.get("response") or "")]
+    correct_abstentions = [r for r in unanswerable if r["verdict"].get("label") == "ok"]
+    abstain_by_text = [r for r in unanswerable if _abstains(r.get("response") or "")]
     exp_abs = len(unanswerable)
     abst_ok = len(correct_abstentions)
 
@@ -130,6 +136,7 @@ def compute_metrics(rows: list[dict], datasets: dict) -> dict:
         "abstention_accuracy": round(abst_ok / exp_abs, 4) if exp_abs else None,
         "expected_abstentions": exp_abs,
         "correct_abstentions": abst_ok,
+        "abstain_detected_by_text": len(abstain_by_text),
         "false_confidence_rate": round(len(false_conf) / N, 4) if N else None,
         "false_confidence_rows": len(false_conf),
         "by_label": dict(label_counter),
@@ -241,7 +248,7 @@ def main() -> int:
         "notes": [
             "severity is PROVISIONAL (heuristic) — real severity requires human/judge annotation",
             "fabrication/unsupported rates are partial: claim-level data only exists for factual",
-            "abstention accuracy computed over the 'unanswerable' category only",
+            "abstention accuracy computed over the 'unanswerable' category only, using the judge 'ok' label as the correct-abstention signal (regex was too narrow — missed 'cannot provide' abstentions and counted an 'I don't know' that asserts afterward)",
             "metrics from AI-judge verdicts are preliminary until dual human annotation (AC2)",
         ],
     }
