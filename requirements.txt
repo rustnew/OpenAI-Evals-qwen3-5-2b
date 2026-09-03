@@ -1,5 +1,6 @@
-# OpenAI Evals + openai client
-openai-evals>=0.4.0
+# Custom runner dependencies. NOTE: the OpenAI Evals FRAMEWORK is NOT used —
+# this is a custom pipeline on the raw openai client + hand-written graders.
+# `openai-evals` is intentionally absent.
 openai>=1.0.0
 
 # data / config
