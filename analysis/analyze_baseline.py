@@ -98,13 +98,24 @@ def compute_metrics(rows: list[dict], datasets: dict) -> dict:
     label_counter = Counter(r["verdict"].get("label") for r in evaluated)
     hallucinated = [r for r in evaluated if r["verdict"].get("label") in HALLUCINATED_LABELS]
 
-    # Fabrication / unsupported from claim-level data (factual has claims).
-    fabricated_rows = [r for r in evaluated if any(c.get("verdict") == "FABRICATED" for c in _claims_of(r))]
-    unsupported_rows = [r for r in evaluated if any(c.get("verdict") == "UNSUPPORTED" for c in _claims_of(r))]
+    # Per-phenomenon populations: each metric is scoped to the dataset that can
+    # actually produce its verdict. Mixing populations distorts the metrics
+    # (an "ok" in looping means "didn't loop", not "factually correct").
+    factual_rows = [r for r in evaluated if r.get("phenomenon") == "false_factual_assertion"]
+    overconf_rows = [r for r in evaluated if r.get("phenomenon") == "overconfidence"]
+    n_factual = len(factual_rows)
+    n_overconf = len(overconf_rows)
+
+    # Fabrication / unsupported from claim-level data (only factual has claims).
+    fabricated_rows = [r for r in factual_rows if any(c.get("verdict") == "FABRICATED" for c in _claims_of(r))]
+    unsupported_rows = [r for r in factual_rows if any(c.get("verdict") == "UNSUPPORTED" for c in _claims_of(r))]
+
+    # Factual accuracy: "ok" in the factual dataset = factually correct.
+    factual_ok = [r for r in factual_rows if r["verdict"].get("label") == "ok"]
 
     # False confidence: overconfidence + high/medium certainty + not correct.
     false_conf = []
-    for r in evaluated:
+    for r in overconf_rows:
         j = (r.get("verdict") or {}).get("judge")
         if (r["verdict"].get("label") == "overconfidence"
                 and isinstance(j, dict)
@@ -128,18 +139,29 @@ def compute_metrics(rows: list[dict], datasets: dict) -> dict:
         "evaluated": N,
         "hallucinated": len(hallucinated),
         "hallucination_rate": round(len(hallucinated) / N, 4) if N else None,
-        "factual_accuracy": round(label_counter.get("ok", 0) / N, 4) if N else None,
-        "fabrication_rate": round(len(fabricated_rows) / N, 4) if N else None,
+        "factual_accuracy": round(len(factual_ok) / n_factual, 4) if n_factual else None,
+        "factual_ok_rows": len(factual_ok),
+        "factual_rows": n_factual,
+        "fabrication_rate": round(len(fabricated_rows) / n_factual, 4) if n_factual else None,
         "fabricated_rows": len(fabricated_rows),
-        "unsupported_claim_rate": round(len(unsupported_rows) / N, 4) if N else None,
+        "unsupported_claim_rate": round(len(unsupported_rows) / n_factual, 4) if n_factual else None,
         "unsupported_rows": len(unsupported_rows),
         "abstention_accuracy": round(abst_ok / exp_abs, 4) if exp_abs else None,
         "expected_abstentions": exp_abs,
         "correct_abstentions": abst_ok,
         "abstain_detected_by_text": len(abstain_by_text),
-        "false_confidence_rate": round(len(false_conf) / N, 4) if N else None,
+        "false_confidence_rate": round(len(false_conf) / n_overconf, 4) if n_overconf else None,
         "false_confidence_rows": len(false_conf),
+        "overconfidence_rows": n_overconf,
         "by_label": dict(label_counter),
+        "metric_populations": {
+            "hallucination_rate": "all evaluated",
+            "factual_accuracy": "factual dataset only",
+            "fabrication_rate": "factual dataset only",
+            "unsupported_claim_rate": "factual dataset only",
+            "abstention_accuracy": "unanswerable category only",
+            "false_confidence_rate": "overconfidence dataset only",
+        },
     }
 
 
