@@ -107,6 +107,10 @@ def main() -> int:
     enable_thinking = thinking_env.lower() in ("1", "true", "yes") if thinking_env else None
     # Deployment config fingerprint (re-baseline attribution, protocol v2 F1).
     fingerprint = os.getenv("EVALS_FINGERPRINT", "")
+    # Anti-429 spacing (gateway rpmPerKey: 30 on qwen3-5-2b-local). Set EVALS_RPM
+    # (e.g. 25) to sleep between gateway calls and stay under the rate limit.
+    rpm = float(os.getenv("EVALS_RPM")) if os.getenv("EVALS_RPM") else None
+    sleep_s = 60.0 / rpm if rpm and rpm > 0 else 0.0
 
     if not api_key or "REPLACE" in api_key:
         print("ERROR: set OPENAI_API_KEY (see config/evals.env.example)", file=sys.stderr)
@@ -126,6 +130,8 @@ def main() -> int:
             continue
         for run in range(args.runs):
             try:
+                if sleep_s:
+                    time.sleep(sleep_s)  # anti-429 (rpmPerKey)
                 out = call_model(client, model, case, temperature, max_tokens, seed + run,
                                  top_p, top_k, enable_thinking)
                 verdict = grader(out["response"], case.get("ground_truth", ""), case.get("context", ""))
@@ -133,12 +139,16 @@ def main() -> int:
                 # cannot decide: open factual responses + overconfidence.
                 if phenomenon == "false_factual_assertion" and verdict.get("label") == "needs_review":
                     try:
+                        if sleep_s:
+                            time.sleep(sleep_s)
                         jv = judge_factual(client, judge_model, case, out["response"])
                         verdict = {"label": jv.get("label", "needs_review"), "judge": jv}
                     except Exception as je:  # noqa: BLE001
                         verdict["judge_error"] = str(je)
                 elif phenomenon == "overconfidence":
                     try:
+                        if sleep_s:
+                            time.sleep(sleep_s)
                         jv = judge_overconfidence(client, judge_model, case, out["response"])
                         verdict = {"label": jv.get("label", "overconfidence"), "judge": jv}
                     except Exception as je:  # noqa: BLE001
