@@ -84,6 +84,8 @@ def main() -> int:
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--out", default="results")
     ap.add_argument("--runs", type=int, default=int(os.getenv("EVALS_RUNS", "1")))
+    ap.add_argument("--condition", default=os.getenv("EVALS_CONDITION", "baseline"),
+                    help="root-cause condition label (e.g. temp-0.2, topk-20, thinking-on) — recorded per row + summary")
     args = ap.parse_args()
 
     base_url = os.getenv("OPENAI_BASE_URL")
@@ -97,6 +99,8 @@ def main() -> int:
     top_k = int(os.getenv("EVALS_TOP_K")) if os.getenv("EVALS_TOP_K") else None
     thinking_env = os.getenv("EVALS_THINKING")
     enable_thinking = thinking_env.lower() in ("1", "true", "yes") if thinking_env else None
+    # Deployment config fingerprint (re-baseline attribution, protocol v2 F1).
+    fingerprint = os.getenv("EVALS_FINGERPRINT", "")
 
     if not api_key or "REPLACE" in api_key:
         print("ERROR: set OPENAI_API_KEY (see config/evals.env.example)", file=sys.stderr)
@@ -140,6 +144,8 @@ def main() -> int:
                 "case_id": case["id"],
                 "category": case["category"],
                 "phenomenon": phenomenon,
+                "condition": args.condition,
+                "fingerprint": fingerprint,
                 "run": run,
                 "prompt": case["prompt"],
                 "context": case.get("context", ""),
@@ -170,6 +176,8 @@ def main() -> int:
         "dataset": args.dataset,
         "model": model,
         "base_url": base_url,
+        "condition": args.condition,
+        "fingerprint": fingerprint,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "top_p": top_p,

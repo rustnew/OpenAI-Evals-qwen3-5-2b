@@ -88,7 +88,7 @@ def main():
     rc = run_evals.main.__wrapped__ if hasattr(run_evals.main, "__wrapped__") else None
     # call main() with argv; it reads env + args
     old_argv = sys.argv
-    sys.argv = ["run_evals.py", "--dataset", fpath, "--out", outdir, "--runs", "2"]
+    sys.argv = ["run_evals.py", "--dataset", fpath, "--out", outdir, "--runs", "2", "--condition", "topk-20"]
     try:
         code = run_evals.main()
     finally:
@@ -102,7 +102,9 @@ def main():
     assert rows, "no output rows"
     for r in rows:
         assert r["top_p"] == 0.9 and r["top_k"] == 20 and r["enable_thinking"] is True, f"row not recorded: {r}"
-    print(f"PASS end-to-end: {len(rows)} rows record top_p=0.9 top_k=20 enable_thinking=true")
+        assert r["condition"] == "topk-20", f"condition not recorded: {r}"
+        assert "fingerprint" in r, f"fingerprint missing: {r}"
+    print(f"PASS end-to-end: {len(rows)} rows record top_p=0.9 top_k=20 thinking=true condition=fingerprint")
 
     print("\nALL TESTS PASSED (local, no network)")
     return 0
