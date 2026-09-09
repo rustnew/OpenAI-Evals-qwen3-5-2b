@@ -63,17 +63,16 @@ def main():
     out = run_evals.call_model(client, "m", case, 0.7, 512, 42, top_p=0.9, top_k=20, enable_thinking=True)
     kwargs = client.captured[-1]
     assert kwargs.get("top_p") == 0.9, f"top_p not passed: {kwargs}"
-    assert kwargs.get("top_k") == 20, f"top_k not passed: {kwargs}"
-    assert kwargs.get("extra_body") == {"enable_thinking": True}, f"extra_body: {kwargs.get('extra_body')}"
+    assert kwargs.get("extra_body") == {"top_k": 20, "enable_thinking": True}, f"extra_body: {kwargs.get('extra_body')}"
     assert out.get("response") == "ok"
-    print("PASS call_model passes top_p/top_k/extra_body and returns response")
+    print("PASS call_model passes top_p + extra_body(top_k, enable_thinking) and returns response")
 
     # 2) unset knobs are NOT passed (baseline = server default)
     client.captured.clear()
     run_evals.call_model(client, "m", case, 0.7, 512, 42)
     kwargs = client.captured[-1]
-    assert "top_p" not in kwargs and "top_k" not in kwargs and "extra_body" not in kwargs, f"baseline leaked knobs: {kwargs}"
-    print("PASS call_model baseline (unset) sends no top_p/top_k/extra_body")
+    assert "top_p" not in kwargs and "extra_body" not in kwargs, f"baseline leaked knobs: {kwargs}"
+    print("PASS call_model baseline (unset) sends no top_p/extra_body")
 
     # 3) end-to-end: env → main() → rows record the knobs (fake client, no network)
     fpath, row = _case_file()

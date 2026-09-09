@@ -56,14 +56,20 @@ def call_model(client: OpenAI, model: str, case: dict, temperature: float, max_t
     }
     # Ticket 4 root-cause sampling factors (one at a time, defaults = baseline).
     # Only pass a knob when explicitly set, so an unset value keeps the server default.
+    # ⚠️ VERIFIED LIVE (2026-09-09): the openai SDK REJECTS top_k as a direct
+    # keyword, and the gateway serves /chat/completions under /v1 — so top_k and
+    # enable_thinking are passed via extra_body.
     if top_p is not None:
         kwargs["top_p"] = top_p
+    extra_body: dict = {}
     if top_k is not None:
-        kwargs["top_k"] = top_k
+        extra_body["top_k"] = top_k
     if enable_thinking is not None:
         # Reasoning mode (Qwen3.5 enable_thinking) is not a standard
         # chat.completions parameter — pass it as extra body.
-        kwargs["extra_body"] = {"enable_thinking": enable_thinking}
+        extra_body["enable_thinking"] = enable_thinking
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     resp = client.chat.completions.create(**kwargs)
     latency_ms = (time.time() - t0) * 1000
     choice = resp.choices[0]
