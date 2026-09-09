@@ -8,7 +8,8 @@ Usage:
 
 Env (see config/evals.env):
     OPENAI_BASE_URL, OPENAI_API_KEY, EVALS_MODEL,
-    EVALS_TEMPERATURE, EVALS_MAX_TOKENS, EVALS_SEED
+    EVALS_TEMPERATURE, EVALS_MAX_TOKENS, EVALS_SEED,
+    EVALS_TOP_P, EVALS_TOP_K, EVALS_THINKING   # Ticket 4 root-cause sampling factors
 """
 
 from __future__ import annotations
@@ -39,19 +40,31 @@ def load_dataset(path: str) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def call_model(client: OpenAI, model: str, case: dict, temperature: float, max_tokens: int, seed: int) -> dict:
+def call_model(client: OpenAI, model: str, case: dict, temperature: float, max_tokens: int, seed: int,
+               top_p=None, top_k=None, enable_thinking=None) -> dict:
     messages = []
     if case.get("context"):
         messages.append({"role": "system", "content": case["context"]})
     messages.append({"role": "user", "content": case["prompt"]})
     t0 = time.time()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        seed=seed,
-    )
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "seed": seed,
+    }
+    # Ticket 4 root-cause sampling factors (one at a time, defaults = baseline).
+    # Only pass a knob when explicitly set, so an unset value keeps the server default.
+    if top_p is not None:
+        kwargs["top_p"] = top_p
+    if top_k is not None:
+        kwargs["top_k"] = top_k
+    if enable_thinking is not None:
+        # Reasoning mode (Qwen3.5 enable_thinking) is not a standard
+        # chat.completions parameter — pass it as extra body.
+        kwargs["extra_body"] = {"enable_thinking": enable_thinking}
+    resp = client.chat.completions.create(**kwargs)
     latency_ms = (time.time() - t0) * 1000
     choice = resp.choices[0]
     return {
@@ -71,6 +84,8 @@ def main() -> int:
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--out", default="results")
     ap.add_argument("--runs", type=int, default=int(os.getenv("EVALS_RUNS", "1")))
+    ap.add_argument("--condition", default=os.getenv("EVALS_CONDITION", "baseline"),
+                    help="root-cause condition label (e.g. temp-0.2, topk-20, thinking-on) — recorded per row + summary")
     args = ap.parse_args()
 
     base_url = os.getenv("OPENAI_BASE_URL")
@@ -79,6 +94,13 @@ def main() -> int:
     temperature = float(os.getenv("EVALS_TEMPERATURE", "1.0"))
     max_tokens = int(os.getenv("EVALS_MAX_TOKENS", "512"))
     seed = int(os.getenv("EVALS_SEED", "42"))
+    # Ticket 4 root-cause sampling factors. Unset (empty) = server default = baseline.
+    top_p = float(os.getenv("EVALS_TOP_P")) if os.getenv("EVALS_TOP_P") else None
+    top_k = int(os.getenv("EVALS_TOP_K")) if os.getenv("EVALS_TOP_K") else None
+    thinking_env = os.getenv("EVALS_THINKING")
+    enable_thinking = thinking_env.lower() in ("1", "true", "yes") if thinking_env else None
+    # Deployment config fingerprint (re-baseline attribution, protocol v2 F1).
+    fingerprint = os.getenv("EVALS_FINGERPRINT", "")
 
     if not api_key or "REPLACE" in api_key:
         print("ERROR: set OPENAI_API_KEY (see config/evals.env.example)", file=sys.stderr)
@@ -98,7 +120,8 @@ def main() -> int:
             continue
         for run in range(args.runs):
             try:
-                out = call_model(client, model, case, temperature, max_tokens, seed + run)
+                out = call_model(client, model, case, temperature, max_tokens, seed + run,
+                                 top_p, top_k, enable_thinking)
                 verdict = grader(out["response"], case.get("ground_truth", ""), case.get("context", ""))
                 # LLM-as-a-judge (our rubric) for what the deterministic path
                 # cannot decide: open factual responses + overconfidence.
@@ -121,6 +144,8 @@ def main() -> int:
                 "case_id": case["id"],
                 "category": case["category"],
                 "phenomenon": phenomenon,
+                "condition": args.condition,
+                "fingerprint": fingerprint,
                 "run": run,
                 "prompt": case["prompt"],
                 "context": case.get("context", ""),
@@ -131,6 +156,9 @@ def main() -> int:
                 "latency_ms": out["latency_ms"],
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "top_p": top_p,
+                "top_k": top_k,
+                "enable_thinking": enable_thinking,
                 "seed": seed + run,
                 "verdict": verdict,
             }
@@ -148,8 +176,13 @@ def main() -> int:
         "dataset": args.dataset,
         "model": model,
         "base_url": base_url,
+        "condition": args.condition,
+        "fingerprint": fingerprint,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "top_p": top_p,
+        "top_k": top_k,
+        "enable_thinking": enable_thinking,
         "seed": seed,
         "runs": args.runs,
         "total_cases": len(cases),
