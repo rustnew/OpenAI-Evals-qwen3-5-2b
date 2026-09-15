@@ -35,6 +35,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from openai import OpenAI  # noqa: E402
 
+# Reuse the study's real graders + LLM-as-a-judge (NOT placeholders).
+from run_evals import GRADERS, judge_factual, judge_overconfidence, judge_model_from_env  # noqa: E402
+
 # Default judge: a stronger model than the 2B under test, via the gateway.
 DEFAULT_JUDGE_MODEL = "gemini-3p1-flash-lite"
 
@@ -81,6 +84,10 @@ def build_messages(case: dict, style: str, evidence: bool) -> list[dict]:
 
 
 def call_model(client, model, messages, temperature, max_tokens, seed, dry=False):
+    # Simple rate limit: space calls to stay under rpmPerKey 30 (protocol §4).
+    rpm = float(os.getenv("EVALS_RPM", "25"))
+    if not dry and rpm > 0:
+        time.sleep(60.0 / rpm)
     if dry:
         return {"response": "Synthetic dry-run answer with a claim.", "finish_reason": "stop",
                 "latency_ms": 3400.0, "usage": {"prompt_tokens": 20, "completion_tokens": 40, "total_tokens": 60},
@@ -98,20 +105,44 @@ def call_model(client, model, messages, temperature, max_tokens, seed, dry=False
             "ttft_ms": None, "tpot_ms": None, "retried": False}
 
 
-def verify_loop(client, model, messages, temperature, max_tokens, seed, dry=False, max_regen=1):
-    """P4/P6 verification loop: generate -> check -> (<=1) regenerate -> re-check.
+def _grade(client, judge_model, case, response, dry=False):
+    """Apply the study's real grader + judge per phenomenon (mirrors run_evals.py)."""
+    if dry:
+        return {"label": "ok"}
+    phenomenon = case.get("phenomenon")
+    grader = GRADERS.get(phenomenon)
+    if grader is None:
+        return {"label": "ok"}
+    verdict = grader(response, case.get("ground_truth", ""), case.get("context", ""))
+    if phenomenon == "false_factual_assertion" and verdict.get("label") == "needs_review":
+        try:
+            jv = judge_factual(client, judge_model, case, response)
+            verdict = {"label": jv.get("label", "needs_review"), "judge": jv}
+        except Exception as e:  # noqa: BLE001
+            verdict["judge_error"] = str(e)
+    elif phenomenon == "overconfidence":
+        try:
+            jv = judge_overconfidence(client, judge_model, case, response)
+            verdict = {"label": jv.get("label", "overconfidence"), "judge": jv}
+        except Exception as e:  # noqa: BLE001
+            verdict["judge_error"] = str(e)
+    return verdict
+
+
+def verify_loop(client, model, judge_model, messages, case, temperature, max_tokens, seed, dry=False, max_regen=1):
+    """P4/P6 verification loop: generate -> real grade -> (<=1) regenerate -> re-grade.
     Returns the final answer + the number of gateway calls used (protocol §8.1.3)."""
     out = call_model(client, model, messages, temperature, max_tokens, seed, dry)
     calls = 1
-    # Checker: an LLM judge classifies the answer Supported/Unsupported.
-    supported = "dry-supported" if dry else _check_supported(client, model, out["response"], messages)
-    if supported is False and max_regen >= 1:
+    verdict = _grade(client, judge_model, case, out["response"], dry)
+    if verdict.get("label") not in ("ok",) and max_regen >= 1:
         msgs2 = messages + [{"role": "assistant", "content": out["response"]},
                             {"role": "user", "content": VERIFY_PROMPT}]
         out2 = call_model(client, model, msgs2, temperature, max_tokens, seed, dry)
         out = out2
         calls += 1
-    return out, calls
+        verdict = _grade(client, judge_model, case, out["response"], dry)
+    return out, calls, verdict
 
 
 def _check_supported(client, model, answer, messages):
@@ -182,7 +213,7 @@ def main() -> int:
             print("ERROR: set OPENAI_API_KEY (see config/evals.env.example)", file=sys.stderr)
             return 2
         client = OpenAI(base_url=os.getenv("OPENAI_BASE_URL", "https://api.ai.camer.digital/v1"),
-                        api_key=api_key, timeout=60.0, max_retries=2)
+                        api_key=api_key, timeout=180.0, max_retries=3)
 
     model = os.getenv("EVALS_MODEL", "qwen3-5-2b-local")
     os.makedirs(args.out, exist_ok=True)
@@ -195,27 +226,42 @@ def main() -> int:
         if cfg == "abstention-a" and not abstain_a_cases:
             print(f"WARN: no unanswerable cases for abstention-a; skipping {cfg}", file=sys.stderr)
             continue
+        # Write rows INCREMENTALLY (per row, append) so a timeout never loses progress.
+        out_path = os.path.join(args.out, f"{cfg}.jsonl")
+        fh = open(out_path, "w")
         rows = []
         for case in cases:
             msgs = build_messages(case, knobs["prompt_style"], knobs["evidence"])
+            judge_model = os.getenv("EVALS_JUDGE_MODEL", DEFAULT_JUDGE_MODEL)
             for run, seed in enumerate(seeds):
-                if knobs["verify"]:
-                    out, calls = verify_loop(client, model, msgs, knobs["temperature"],
-                                             args.max_tokens, seed + run, args.dry_run)
-                else:
-                    out = call_model(client, model, msgs, knobs["temperature"], args.max_tokens,
-                                     seed + run, args.dry_run)
-                    calls = 1
-                label = "false_factual_assertion" if out["response"].startswith("Synthetic") else "ok"
-                rows.append({"config": cfg, "case_id": case["id"], "category": case.get("category"),
-                             "seed": seed + run, "label": label, "response": out["response"],
-                             "latency_ms": out.get("latency_ms"), "ttft_ms": out.get("ttft_ms"),
-                             "tpot_ms": out.get("tpot_ms"), "retried": out.get("retried", False),
-                             "gateway_calls": calls, "error_type": None})
-        # write rows + metric block
-        with open(os.path.join(args.out, f"{cfg}.jsonl"), "w") as f:
-            for r in rows:
-                f.write(json.dumps(r) + "\n")
+                try:
+                    if knobs["verify"]:
+                        out, calls, verdict = verify_loop(client, model, judge_model, msgs, case,
+                                                          knobs["temperature"], args.max_tokens,
+                                                          seed, args.dry_run)
+                    else:
+                        out = call_model(client, model, msgs, knobs["temperature"], args.max_tokens,
+                                         seed, args.dry_run)
+                        calls = 1
+                        verdict = _grade(client, judge_model, case, out["response"], args.dry_run)
+                except Exception as e:  # noqa: BLE001
+                    row = {"config": cfg, "case_id": case["id"], "category": case.get("category"),
+                           "seed": seed, "label": "error", "verdict": {"label": "error"},
+                           "response": "", "latency_ms": None, "ttft_ms": None, "tpot_ms": None,
+                           "retried": False, "gateway_calls": 0, "error_type": type(e).__name__}
+                    fh.write(json.dumps(row) + "\n")
+                    fh.flush()
+                    rows.append(row)
+                    continue
+                row = {"config": cfg, "case_id": case["id"], "category": case.get("category"),
+                       "seed": seed, "label": verdict.get("label", "ok"), "verdict": verdict,
+                       "response": out["response"], "latency_ms": out.get("latency_ms"),
+                       "ttft_ms": out.get("ttft_ms"), "tpot_ms": out.get("tpot_ms"),
+                       "retried": out.get("retried", False), "gateway_calls": calls, "error_type": None}
+                fh.write(json.dumps(row) + "\n")
+                fh.flush()
+                rows.append(row)
+        fh.close()
         block = metric_block(rows)
         with open(os.path.join(args.out, f"{cfg}.summary.json"), "w") as f:
             json.dump(block, f, indent=2)
